@@ -9,10 +9,11 @@
 
 import { fileURLToPath } from 'url';
 import { join, dirname, basename, normalize } from 'path';
-import { existsSync, readdirSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, mkdirSync, renameSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, mkdirSync, renameSync, statSync } from 'fs';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import { createConnection, Socket } from 'net';
+import { homedir } from 'os';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -97,7 +98,43 @@ class GodotServer {
   private readonly INTERACTION_PORT = 9090;
   private readonly AUTOLOAD_NAME = 'McpInteractionServer';
 
+  /**
+   * Load persisted configuration from JSON files.
+   * Lookup order (later entries override earlier ones):
+   *   1. <userHome>/.godot-mcp.json
+   *   2. <cwd>/godot-mcp.config.json
+   *   3. Path pointed to by GODOT_MCP_CONFIG env var
+   * Returns an empty object if no file is found or all fail to parse.
+   */
+  private static loadConfigFromDisk(): GodotServerConfig {
+    const candidates: string[] = [
+      join(homedir(), '.godot-mcp.json'),
+      join(process.cwd(), 'godot-mcp.config.json'),
+    ];
+    if (process.env.GODOT_MCP_CONFIG) {
+      candidates.push(process.env.GODOT_MCP_CONFIG);
+    }
+
+    let merged: GodotServerConfig = {};
+    for (const file of candidates) {
+      try {
+        if (!existsSync(file)) continue;
+        const raw = readFileSync(file, 'utf8');
+        const parsed = JSON.parse(raw) as GodotServerConfig;
+        merged = { ...merged, ...parsed };
+        console.error(`[SERVER] Loaded config from ${file}`);
+      } catch (err) {
+        console.error(`[SERVER] Failed to load config file ${file}: ${(err as Error).message}`);
+      }
+    }
+    return merged;
+  }
+
   constructor(config?: GodotServerConfig) {
+    // Merge disk config with explicit config; explicit config wins.
+    const diskConfig = GodotServer.loadConfigFromDisk();
+    config = { ...diskConfig, ...(config ?? {}) };
+
     // Apply configuration if provided
     let debugMode = DEBUG_MODE;
     let godotDebugMode = GODOT_DEBUG_MODE;
@@ -267,6 +304,33 @@ class GodotServer {
         'C:\\Program Files (x86)\\Godot_4\\Godot.exe',
         `${process.env.USERPROFILE}\\Godot\\Godot.exe`
       );
+
+      // Also scan %USERPROFILE% and %LOCALAPPDATA% top level for
+      // Godot_v*_win64.exe (both direct .exe and folder-with-same-name-inside).
+      const scanRoots = [process.env.USERPROFILE, process.env.LOCALAPPDATA].filter(
+        (p): p is string => !!p
+      );
+      for (const root of scanRoots) {
+        try {
+          for (const entry of readdirSync(root)) {
+            if (!/^Godot.*win64.*\.exe$/i.test(entry) && !/^Godot.*win64$/i.test(entry)) continue;
+            const full = join(root, entry);
+            try {
+              const st = statSync(full);
+              if (st.isFile()) {
+                possiblePaths.push(full);
+              } else if (st.isDirectory()) {
+                // e.g. C:\Users\X\Godot_v4.6.3-stable_win64.exe\Godot_v4.6.3-stable_win64.exe
+                const nested = join(full, entry);
+                if (existsSync(nested)) possiblePaths.push(nested);
+                // also check for a plain Godot.exe inside the folder
+                const alt = join(full, 'Godot.exe');
+                if (existsSync(alt)) possiblePaths.push(alt);
+              }
+            } catch { /* ignore stat errors */ }
+          }
+        } catch { /* ignore missing dirs */ }
+      }
     } else if (osPlatform === 'linux') {
       possiblePaths.push(
         '/usr/bin/godot',

@@ -40,7 +40,8 @@
     "prepare": "npm run build",
     "watch": "tsc --watch",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "set-godot-path": "node scripts/set-godot-path.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.26.0",
